@@ -1,4 +1,4 @@
-use crate::chess_minmax::negamax_prelude;
+use crate::chess_minmax::{negamax_prelude, BoardHash, TranspositionItem};
 use chess::{
     get_file, Action, BitBoard, Board, BoardStatus, ChessMove, Color, File, Game, MoveGen, Piece,
     Rank, Square,
@@ -9,6 +9,9 @@ use rand::rngs::ThreadRng;
 use rand::{thread_rng, Rng};
 use std::io::{stdin, stdout, Write};
 use std::str::FromStr;
+use lru::LruCache;
+use std::hash::{BuildHasherDefault, BuildHasher};
+use seahash::SeaHasher;
 
 pub mod colors;
 
@@ -31,7 +34,7 @@ struct ChessTexture {
 }
 
 impl ChessTexture {
-    const IMG_SIZE: u32 = 45;
+    const IMG_SIZE: u32 = 90;
 
     pub fn new(context: &mut G2dTextureContext) -> Self {
         let empty_setting = TextureSettings::new();
@@ -63,11 +66,13 @@ pub struct ChessGraphic {
     mouse_y: f64,
     draw_size: [u32; 2],
     rng: ThreadRng,
+    cache: LruCache<BoardHash, TranspositionItem, BuildHasherDefault<SeaHasher>>,
     dirty: bool,
     textures: ChessTexture,
-    depth: u32,
+    depth: u8,
     enable_ai: bool,
     last_mov: Option<ChessMove>,
+    display_swap_side: bool
 }
 
 impl ChessGraphic {
@@ -89,12 +94,13 @@ impl ChessGraphic {
         println!("I: Input FEN");
         println!("H: print PNG history");
         println!("R: Reset Game");
+        println!("S: Swap Side");
         println!("RIGHT: increase AI depth");
         println!("LEFT: decrease AI depth");
     }
 
     pub fn from_game(game: Game, texture_context: &mut G2dTextureContext) -> Self {
-        const DEFAULT_DEPTH: u32 = 4;
+        const DEFAULT_DEPTH: u8 = 4;
         println!("Game initialized with Depth {} AI\n", DEFAULT_DEPTH);
 
         Self::print_control_message();
@@ -107,31 +113,38 @@ impl ChessGraphic {
             mouse_y: Default::default(),
             draw_size: Default::default(),
             rng: thread_rng(),
+            cache: LruCache::with_hasher(crate::CACHE_SIZE, Default::default()),
             dirty: true,
             textures: ChessTexture::new(texture_context),
             depth: DEFAULT_DEPTH,
             enable_ai: true,
             last_mov: None,
+            display_swap_side: false
         }
     }
 
     pub fn reset(&mut self) {
-        println!();
-        Self::print_control_message();
-        println!();
         self.chess_game = Game::new();
         self.selecting = None;
         self.last_mov = None;
+
+        println!("Clearing Cache...");
+        self.cache.clear();
+        println!("Done");
+
+        println!();
+        Self::print_control_message();
+        println!();
     }
 
     pub fn input_fen(&mut self) {
         print!("Input FEN: ");
         stdout().flush().unwrap();
 
-        let mut fen = String::with_capacity(56 /* normal length of FEN string */);
+        let mut fen = String::with_capacity(70 /* normal length of FEN string */);
         stdin().read_line(&mut fen).unwrap();
 
-        debug_assert!(fen.len() <= 56);
+        debug_assert!(fen.len() <= 70);
 
         match Game::from_str(fen.as_str()) {
             Err(e) => println!("{}", e),
@@ -163,12 +176,12 @@ impl ChessGraphic {
     fn redraw(&self, c: Context, g: &mut G2d) {
         Self::draw_grid(c, g, 8, 8);
         if let Some(last_mov) = self.last_mov {
-            Self::draw_last_move(c, g, last_mov);
+            Self::draw_last_move(c, g, last_mov, self.display_swap_side);
         }
-        Self::draw_pieces(c, g, &self.chess_game.current_position(), &self.textures);
+        Self::draw_pieces(c, g, &self.chess_game.current_position(), &self.textures, self.display_swap_side);
 
         if let Some(square) = self.selecting {
-            Self::draw_selecting(c, g, square);
+            Self::draw_selecting(c, g, square, self.display_swap_side);
         }
     }
 
@@ -195,14 +208,14 @@ impl ChessGraphic {
         }
     }
 
-    fn draw_last_move(c: Context, g: &mut G2d, last_mov: ChessMove) {
-        let source_rect = Self::square_to_rect(&last_mov.get_source(), &c.viewport.unwrap());
+    fn draw_last_move(c: Context, g: &mut G2d, last_mov: ChessMove, swap: bool) {
+        let source_rect = Self::square_to_rect(&last_mov.get_source(), &c.viewport.unwrap(), swap);
         rectangle(colors::GRID_COLOR_MOVED, source_rect, c.transform, g);
-        let destination_rect = Self::square_to_rect(&last_mov.get_dest(), &c.viewport.unwrap());
+        let destination_rect = Self::square_to_rect(&last_mov.get_dest(), &c.viewport.unwrap(), swap);
         rectangle(colors::GRID_COLOR_MOVED, destination_rect, c.transform, g);
     }
 
-    fn draw_pieces(c: Context, g: &mut G2d, board: &Board, textures: &ChessTexture) {
+    fn draw_pieces(c: Context, g: &mut G2d, board: &Board, textures: &ChessTexture, swap: bool) {
         let vp_ref = &c.viewport.unwrap();
 
         let img_size = ChessTexture::IMG_SIZE as f64;
@@ -222,117 +235,34 @@ impl ChessGraphic {
         let queen = board.pieces(Piece::Queen);
         let king = board.pieces(Piece::King);
 
-        for square in white & pawn {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_pawn,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
+        let mut draw_piece = |bitboard: BitBoard, texture: &G2dTexture| {
+            bitboard.for_each(|square| {
+                let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref, swap);
+                image(
+                    texture,
+                    c.trans(x0, y0).scale(sx, sy).transform,
+                    g,
+                );
+            })
+        };
 
-        for square in white & knight {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_knight,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
+        draw_piece(white & pawn, &textures.white_pawn);
+        draw_piece(white & knight, &textures.white_knight);
+        draw_piece(white & bishop, &textures.white_bishop);
+        draw_piece(white & rook, &textures.white_rook);
+        draw_piece(white & king, &textures.white_king);
+        draw_piece(white & queen, &textures.white_queen);
 
-        for square in white & bishop {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_bishop,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in white & rook {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_rook,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in white & king {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_king,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in white & queen {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.white_queen,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & pawn {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_pawn,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & knight {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_knight,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & bishop {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_bishop,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & rook {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_rook,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & king {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_king,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
-
-        for square in black & queen {
-            let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref);
-            image(
-                &textures.black_queen,
-                c.trans(x0, y0).scale(sx, sy).transform,
-                g,
-            );
-        }
+        draw_piece(black & pawn, &textures.black_pawn);
+        draw_piece(black & knight, &textures.black_knight);
+        draw_piece(black & bishop, &textures.black_bishop);
+        draw_piece(black & rook, &textures.black_rook);
+        draw_piece(black & king, &textures.black_king);
+        draw_piece(black & queen, &textures.black_queen);
     }
 
-    fn draw_selecting(c: Context, g: &mut G2d, square: Square) {
-        let draw_rect = Self::square_to_rect(&square, &c.viewport.unwrap());
+    fn draw_selecting(c: Context, g: &mut G2d, square: Square, swap: bool) {
+        let draw_rect = Self::square_to_rect(&square, &c.viewport.unwrap(),swap);
         let marking_rect = rectangle::margin(draw_rect, 0.5);
 
         ellipse(colors::COLOR_SELECTED, marking_rect, c.transform, g);
@@ -354,7 +284,7 @@ impl ChessGraphic {
         }
 
         self.mark_dirty();
-        let clicking_square = Self::pos_to_square(self.draw_size, self.mouse_x, self.mouse_y);
+        let clicking_square = Self::pos_to_square(self.draw_size, self.mouse_x, self.mouse_y, self.display_swap_side);
 
         match self.selecting {
             // no square previously select
@@ -363,7 +293,6 @@ impl ChessGraphic {
             }
             // predicate "there exist square for which the user previously select" is true
             Some(select_square) => {
-
                 // handle promotion
                 let is_selecting_pawn = || {
                     self.chess_game
@@ -428,6 +357,10 @@ impl ChessGraphic {
                     self.enable_ai = true;
                 }
             }
+            Key::S => {
+                self.display_swap_side = !self.display_swap_side;
+                self.mark_dirty();
+            },
             Key::R => self.reset(),
             Key::I => self.input_fen(),
             _ => {}
@@ -454,13 +387,14 @@ impl ChessGraphic {
             &self.chess_game.current_position(),
             &mut self.rng,
             self.depth,
+            &mut self.cache
         );
 
         if let Some((ai_move, expect_score)) = ai_result {
             println!(
-                "AI ({:?}): Expected Advantage: {:.2}",
+                "AI ({:?}): Expected Advantage: {:.2} pawn",
                 self.chess_game.current_position().side_to_move(),
-                expect_score
+                expect_score as f32 / 100.0
             );
             self.make_move_msg(ai_move);
         } else {
@@ -494,18 +428,26 @@ impl ChessGraphic {
         }
     }
 
-    fn run_ai(board: &Board, rng: &mut impl Rng, depth: u32) -> Option<(ChessMove, f64)> {
-        negamax_prelude(board, depth, rng)
+    fn run_ai<K: BuildHasher>(board: &Board, rng: &mut impl Rng, depth: u8, cache: &mut LruCache<BoardHash, TranspositionItem, K>) -> Option<(ChessMove, i16)> {
+        negamax_prelude(board, depth, rng, cache)
     }
 
     fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn square_to_rect(square: &Square, viewport: &Viewport) -> [f64; 4] {
+    fn square_to_rect(square: &Square, viewport: &Viewport, swap: bool) -> [f64; 4] {
         let (rank, file) = (square.get_rank(), square.get_file());
-        let r = rank.to_index() as f64;
-        let f = file.to_index() as f64;
+        let r = {
+            let r = rank.to_index() as f64;
+            if swap { (NUM_RANK-1) as f64 - r }
+            else { r }
+        };
+        let f = {
+            let f = file.to_index() as f64;
+            if swap { (NUM_FILE-1) as f64 - f }
+            else { f }
+        };
 
         let w = f64::from(viewport.draw_size[0]);
         let h = f64::from(viewport.draw_size[1]);
@@ -518,14 +460,20 @@ impl ChessGraphic {
         rectangle::rectangle_by_corners(x0, y0, x1, y1)
     }
 
-    fn pos_to_square(draw_size: [u32; 2], x: f64, y: f64) -> Square {
+    fn pos_to_square(draw_size: [u32; 2], x: f64, y: f64, swap: bool) -> Square {
         let [w, h] = draw_size;
 
         let rel_x = x / f64::from(w);
         let rel_y = y / f64::from(h);
 
-        let file = File::from_index((NUM_FILE as f64 * rel_x) as usize);
-        let rank = Rank::from_index((NUM_RANK - 1) - (NUM_RANK as f64 * rel_y) as usize);
+        let file = File::from_index({
+            let file_pos = NUM_FILE as f64 * rel_x;
+            if swap { NUM_FILE as f64 - file_pos } else { file_pos }
+        } as usize);
+        let rank = Rank::from_index({
+            let inv_rank_pos = NUM_RANK as f64 * rel_y;
+            if swap { inv_rank_pos } else { NUM_RANK as f64 - inv_rank_pos}
+        } as usize);
 
         Square::make_square(rank, file)
     }

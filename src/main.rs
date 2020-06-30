@@ -1,8 +1,8 @@
-use chess::{BitBoard, Board, BoardStatus, ChessMove, Color, Game, MoveGen, Piece, Square};
+use chess::{Board, BoardStatus, ChessMove, Color, Game, MoveGen, Piece, Square};
 use rand::{thread_rng, Rng};
-use std::cmp::Ordering::Equal;
-use std::f64::{INFINITY, NEG_INFINITY};
-use std::time::{Duration, Instant};
+
+
+use std::time::{Instant};
 
 use std::io::stdin;
 use std::str::FromStr;
@@ -12,9 +12,14 @@ use chess_minmax::negamax_prelude;
 
 mod chess_graphic;
 use chess_graphic::ChessGraphic;
+use std::fs::OpenOptions;
+use lru::LruCache;
+
+pub const CACHE_SIZE: usize = 4096;
 
 fn main() {
     graphic();
+    // batch_generator();
 }
 
 fn graphic() {
@@ -55,78 +60,77 @@ fn io() {
 
         let board = Board::from_str(&input_str).expect("Invalid FEN");
         let rng = &mut thread_rng();
-        const DEPTH: u32 = 5;
+        let mut cache = LruCache::new(CACHE_SIZE);
 
-        let result = negamax_prelude(&board, DEPTH, rng).unwrap();
+        const DEPTH: u8 = 5;
+
+        let result = negamax_prelude(&board, DEPTH, rng, &mut cache).unwrap();
 
         println!("{} {}", result.0, result.1);
     }
 }
 
 fn batch_generator() {
+    use std::io::Write;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(concat!(env!("CARGO_MANIFEST_DIR"), "/chess.txt"))
+        .unwrap();
+
     // sicilian defense
     let mut game = Game::new();
     game.make_move(ChessMove::new(Square::E2, Square::E4, None));
     game.make_move(ChessMove::new(Square::C7, Square::C5, None));
-    print!("1. e2e4 c7c5 {{Sicilian Defense}} ");
+    write!(file, "e2e4 c7c5 {{Sicilian Defense}} ").unwrap();
     game.make_move(ChessMove::new(Square::G1, Square::F3, None));
     game.make_move(ChessMove::new(Square::D7, Square::D6, None));
-    print!("2. g1f3 d7d6 {{Sicilian Continue}} ");
+    write!(file, "g1f3 d7d6 {{Sicilian Continue}} ").unwrap();
     // fen
     // let mut game = Game::from_str("4k3/8/1p6/8/8/8/5QQQ/4K3 w - - 0 1").unwrap();
 
     const START_NUM: u32 = 4;
     const MAX_LENGTH: u32 = 150;
 
-    const SCORE_DISPLAY_THRESHOLD: f64 = 1e5;
-
-    const WHITE_DEPTH: u32 = 4;
-    const BLACK_DEPTH: u32 = 4;
+    const WHITE_DEPTH: u8 = 6;
+    const BLACK_DEPTH: u8 = 6;
 
     let rng = &mut thread_rng();
+    let mut cache = LruCache::new(CACHE_SIZE);
 
     let start_time = Instant::now();
 
-    for i in START_NUM..MAX_LENGTH + START_NUM {
-        print!("{}. ", i);
-        if let Some((mov, score)) = negamax_prelude(&game.current_position(), WHITE_DEPTH, rng) {
+    for _ in START_NUM..MAX_LENGTH + START_NUM {
+        let mut step = |game: &mut Game, mov| {
             game.make_move(mov);
 
-            print!("{}{}", mov.get_source(), mov.get_dest());
-            print!(
+            write!(file, "{}{}", mov.get_source(), mov.get_dest()).unwrap();
+            write!(
+                file,
                 "{} ",
                 mov.get_promotion()
                     .map_or(String::new(), |x| x.to_string(Color::White))
-            );
+            )
+            .unwrap();
 
-            if score < SCORE_DISPLAY_THRESHOLD || score > -SCORE_DISPLAY_THRESHOLD {
+            /*if score < SCORE_DISPLAY_THRESHOLD || score > -SCORE_DISPLAY_THRESHOLD {
                 print!("{{{:.2}}} ", score);
             } else if score > 0.0 {
                 print!("{{inf}} ")
             } else {
                 print!("{{-inf}}")
-            }
+            }*/
+        };
+
+        if let Some((mov, score)) = negamax_prelude(&game.current_position(), WHITE_DEPTH, rng, &mut cache) {
+            step(&mut game, mov);
         } else {
             break;
         }
 
-        if let Some((mov, score)) = negamax_prelude(&game.current_position(), BLACK_DEPTH, rng) {
-            game.make_move(mov);
-
-            print!("{}{}", mov.get_source(), mov.get_dest());
-            print!(
-                "{} ",
-                mov.get_promotion()
-                    .map_or(String::new(), |x| x.to_string(Color::White))
-            );
-
-            if score < SCORE_DISPLAY_THRESHOLD || score > -SCORE_DISPLAY_THRESHOLD {
-                print!("{{{:.2}}} ", score);
-            } else if score > 0.0 {
-                print!("{{inf}} ")
-            } else {
-                print!("{{-inf}}")
-            }
+        if let Some((mov, score)) = negamax_prelude(&game.current_position(), BLACK_DEPTH, rng, &mut cache) {
+            step(&mut game, mov);
         } else {
             break;
         }
@@ -135,5 +139,5 @@ fn batch_generator() {
     let end_time = Instant::now();
 
     println!();
-    println!("time used: {} ms", (end_time - start_time).as_millis());
+    println!("time used: {:?}", end_time - start_time);
 }
