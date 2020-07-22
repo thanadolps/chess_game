@@ -1,8 +1,7 @@
-use chess::{Board, BoardStatus, ChessMove, Color, Game, MoveGen, Piece, Square};
-use rand::{thread_rng, Rng};
+use chess::{Board, ChessMove, Color, Game, MoveGen, Piece, Square};
+use rand::thread_rng;
 
-
-use std::time::{Instant};
+use std::time::Instant;
 
 use std::io::stdin;
 use std::str::FromStr;
@@ -12,8 +11,8 @@ use chess_minmax::negamax_prelude;
 
 mod chess_graphic;
 use chess_graphic::ChessGraphic;
-use std::fs::OpenOptions;
 use lru::LruCache;
+use std::fs::OpenOptions;
 
 pub const CACHE_SIZE: usize = 4096;
 
@@ -51,7 +50,7 @@ fn graphic() {
         }
     }
 }
-
+/*
 fn io() {
     loop {
         let mut input_str: String = String::new();
@@ -123,13 +122,17 @@ fn batch_generator() {
             }*/
         };
 
-        if let Some((mov, score)) = negamax_prelude(&game.current_position(), WHITE_DEPTH, rng, &mut cache) {
+        if let Some((mov, _score)) =
+            negamax_prelude(&game.current_position(), WHITE_DEPTH, rng, &mut cache)
+        {
             step(&mut game, mov);
         } else {
             break;
         }
 
-        if let Some((mov, score)) = negamax_prelude(&game.current_position(), BLACK_DEPTH, rng, &mut cache) {
+        if let Some((mov, _score)) =
+            negamax_prelude(&game.current_position(), BLACK_DEPTH, rng, &mut cache)
+        {
             step(&mut game, mov);
         } else {
             break;
@@ -141,3 +144,4 @@ fn batch_generator() {
     println!();
     println!("time used: {:?}", end_time - start_time);
 }
+*/

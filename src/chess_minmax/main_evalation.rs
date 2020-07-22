@@ -1,4 +1,4 @@
-use chess::{Board, Color, Piece, ALL_FILES, get_file, NUM_RANKS, ALL_RANKS, get_rank, BitBoard};
+use chess::{BitBoard, Board, Color, Piece, ALL_FILES, ALL_RANKS, NUM_RANKS};
 
 pub mod piece_square_tables;
 use piece_square_tables::*;
@@ -14,8 +14,9 @@ pub fn evaluation_pieces_worth_plus(board: &Board) -> i16 {
     let queen = board.pieces(Piece::Queen);
     let king = board.pieces(Piece::King);
 
-    let delta_piece_table = |piece_bb: &BitBoard, w_table: &[i16; 64], b_table: &[i16; 64]|
-        weighted_sum(piece_bb & white, w_table) - weighted_sum(piece_bb & black, b_table);
+    let delta_piece_table = |piece_bb: &BitBoard, w_table: &[i16; 64], b_table: &[i16; 64]| {
+        weighted_sum(piece_bb & white, w_table) - weighted_sum(piece_bb & black, b_table)
+    };
 
     let delta_pawn_p = delta_piece_table(pawn, &WHITE_PAWN, &BLACK_PAWN);
     let delta_rook_p = delta_piece_table(rook, &WHITE_ROOK, &BLACK_ROOK);

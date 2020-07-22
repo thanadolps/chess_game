@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+export.rar
+export
+*.iml
+.idea
+.env

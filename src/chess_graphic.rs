@@ -1,17 +1,18 @@
-use crate::chess_minmax::{negamax_prelude, BoardHash, TranspositionItem};
+use crate::chess_minmax::{negamax_prelude, negamax_prelude_2nd, BoardHash, TranspositionItem};
+
 use chess::{
-    get_file, Action, BitBoard, Board, BoardStatus, ChessMove, Color, File, Game, MoveGen, Piece,
-    Rank, Square,
+    Action, BitBoard, Board, BoardStatus, ChessMove, Color, File, Game, Piece, Rank, Square,
 };
 use itertools::Itertools;
+use lru::LruCache;
 use piston_window::*;
 use rand::rngs::ThreadRng;
 use rand::{thread_rng, Rng};
+use seahash::SeaHasher;
+use std::hash::{BuildHasher, BuildHasherDefault};
 use std::io::{stdin, stdout, Write};
 use std::str::FromStr;
-use lru::LruCache;
-use std::hash::{BuildHasherDefault, BuildHasher};
-use seahash::SeaHasher;
+use std::collections::HashSet;
 
 pub mod colors;
 
@@ -60,6 +61,7 @@ impl ChessTexture {
 }
 
 pub struct ChessGraphic {
+    base_game: Game,
     chess_game: Game,
     selecting: Option<Square>,
     mouse_x: f64,
@@ -71,8 +73,7 @@ pub struct ChessGraphic {
     textures: ChessTexture,
     depth: u8,
     enable_ai: bool,
-    last_mov: Option<ChessMove>,
-    display_swap_side: bool
+    display_swap_side: bool,
 }
 
 impl ChessGraphic {
@@ -88,7 +89,9 @@ impl ChessGraphic {
     }
 
     fn print_control_message() {
-        println!("SEMICOLON: make AI play");
+        println!("SEMICOLON (;): make AI play");
+        println!("BACKSLASH (/): make AI play 2nd best move");
+        println!("Z: Undo move (if possible)");
         println!("A: toggle AI");
         println!("F: print FEN");
         println!("I: Input FEN");
@@ -107,6 +110,7 @@ impl ChessGraphic {
         println!();
 
         ChessGraphic {
+            base_game: game.clone(),
             chess_game: game,
             selecting: None,
             mouse_x: Default::default(),
@@ -118,15 +122,14 @@ impl ChessGraphic {
             textures: ChessTexture::new(texture_context),
             depth: DEFAULT_DEPTH,
             enable_ai: true,
-            last_mov: None,
-            display_swap_side: false
+            display_swap_side: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.chess_game = Game::new();
+        self.base_game = self.chess_game.clone();
         self.selecting = None;
-        self.last_mov = None;
 
         println!("Clearing Cache...");
         self.cache.clear();
@@ -151,6 +154,7 @@ impl ChessGraphic {
             Ok(game) => {
                 self.reset();
                 self.chess_game = game;
+                self.base_game = self.chess_game.clone();
             }
         }
     }
@@ -175,10 +179,22 @@ impl ChessGraphic {
 
     fn redraw(&self, c: Context, g: &mut G2d) {
         Self::draw_grid(c, g, 8, 8);
-        if let Some(last_mov) = self.last_mov {
+        if let Some(&last_mov) = self.chess_game.actions().iter().rev().find_map(|act| {
+            if let Action::MakeMove(mov) = act {
+                Some(mov)
+            } else {
+                None
+            }
+        }) {
             Self::draw_last_move(c, g, last_mov, self.display_swap_side);
         }
-        Self::draw_pieces(c, g, &self.chess_game.current_position(), &self.textures, self.display_swap_side);
+        Self::draw_pieces(
+            c,
+            g,
+            &self.chess_game.current_position(),
+            &self.textures,
+            self.display_swap_side,
+        );
 
         if let Some(square) = self.selecting {
             Self::draw_selecting(c, g, square, self.display_swap_side);
@@ -211,7 +227,8 @@ impl ChessGraphic {
     fn draw_last_move(c: Context, g: &mut G2d, last_mov: ChessMove, swap: bool) {
         let source_rect = Self::square_to_rect(&last_mov.get_source(), &c.viewport.unwrap(), swap);
         rectangle(colors::GRID_COLOR_MOVED, source_rect, c.transform, g);
-        let destination_rect = Self::square_to_rect(&last_mov.get_dest(), &c.viewport.unwrap(), swap);
+        let destination_rect =
+            Self::square_to_rect(&last_mov.get_dest(), &c.viewport.unwrap(), swap);
         rectangle(colors::GRID_COLOR_MOVED, destination_rect, c.transform, g);
     }
 
@@ -238,11 +255,7 @@ impl ChessGraphic {
         let mut draw_piece = |bitboard: BitBoard, texture: &G2dTexture| {
             bitboard.for_each(|square| {
                 let [x0, y0, _, _] = Self::square_to_rect(&square, vp_ref, swap);
-                image(
-                    texture,
-                    c.trans(x0, y0).scale(sx, sy).transform,
-                    g,
-                );
+                image(texture, c.trans(x0, y0).scale(sx, sy).transform, g);
             })
         };
 
@@ -262,7 +275,7 @@ impl ChessGraphic {
     }
 
     fn draw_selecting(c: Context, g: &mut G2d, square: Square, swap: bool) {
-        let draw_rect = Self::square_to_rect(&square, &c.viewport.unwrap(),swap);
+        let draw_rect = Self::square_to_rect(&square, &c.viewport.unwrap(), swap);
         let marking_rect = rectangle::margin(draw_rect, 0.5);
 
         ellipse(colors::COLOR_SELECTED, marking_rect, c.transform, g);
@@ -284,7 +297,12 @@ impl ChessGraphic {
         }
 
         self.mark_dirty();
-        let clicking_square = Self::pos_to_square(self.draw_size, self.mouse_x, self.mouse_y, self.display_swap_side);
+        let clicking_square = Self::pos_to_square(
+            self.draw_size,
+            self.mouse_x,
+            self.mouse_y,
+            self.display_swap_side,
+        );
 
         match self.selecting {
             // no square previously select
@@ -325,7 +343,7 @@ impl ChessGraphic {
                     self.selecting = None; // deselect the pieces
 
                     if self.enable_ai {
-                        self.ai_play();
+                        self.ai_play(false);
                     }
                 } else {
                     // move is illegal
@@ -338,7 +356,9 @@ impl ChessGraphic {
     fn keyboard_input(&mut self, key: Key) {
         match key {
             Key::F => println!("{}", self.chess_game.current_position()),
-            Key::Semicolon => self.ai_play(),
+            Key::Semicolon => self.ai_play(false),
+            Key::Backslash => self.ai_play(true),
+            Key::Z => self.undo(),
             Key::Right | Key::Plus | Key::NumPadPlus => {
                 self.depth += 1;
                 println!("AI: Set Depth={}", self.depth)
@@ -360,7 +380,7 @@ impl ChessGraphic {
             Key::S => {
                 self.display_swap_side = !self.display_swap_side;
                 self.mark_dirty();
-            },
+            }
             Key::R => self.reset(),
             Key::I => self.input_fen(),
             _ => {}
@@ -376,18 +396,48 @@ impl ChessGraphic {
         self.draw_size = resize_args.draw_size;
     }
 
+    fn undo(&mut self) {
+        if let Some((last_act, prev_acts)) = self.chess_game.actions().split_last() {
+            println!("Undo Success! ({} undo left)", prev_acts.len());
+
+            let mut game = self.base_game.clone();
+
+            prev_acts
+                .iter()
+                .filter_map(|act| {
+                    if let Action::MakeMove(mov) = act {
+                        Some(*mov)
+                    } else {
+                        None
+                    }
+                })
+                .for_each(|mov| {
+                    game.make_move(mov);
+                });
+
+            self.chess_game = game;
+        } else {
+            println!("Undo queue is empty");
+        }
+    }
+
     // AI BIND
-    fn ai_play(&mut self) {
+    fn ai_play(&mut self, play_2nd_best: bool) {
         if !self.enable_ai {
             println!("AI: AI not enable");
             return;
         }
 
-        let ai_result = Self::run_ai(
+        let ai_result = (if play_2nd_best {
+            Self::run_ai_2nd
+        } else {
+            Self::run_ai
+        })(
             &self.chess_game.current_position(),
             &mut self.rng,
             self.depth,
-            &mut self.cache
+            &mut self.cache,
+            &Self::get_potential_repetition(&self.chess_game, &self.base_game)
         );
 
         if let Some((ai_move, expect_score)) = ai_result {
@@ -407,7 +457,6 @@ impl ChessGraphic {
         match self.chess_game.current_position().status() {
             BoardStatus::Ongoing => {
                 let move_result = self.chess_game.make_move(mov);
-                self.last_mov = Some(mov);
                 Ok(move_result)
             }
             BoardStatus::Stalemate => Err("Stalemated".to_string()),
@@ -428,8 +477,48 @@ impl ChessGraphic {
         }
     }
 
-    fn run_ai<K: BuildHasher>(board: &Board, rng: &mut impl Rng, depth: u8, cache: &mut LruCache<BoardHash, TranspositionItem, K>) -> Option<(ChessMove, i16)> {
-        negamax_prelude(board, depth, rng, cache)
+    fn run_ai<K: BuildHasher>(
+        board: &Board,
+        rng: &mut impl Rng,
+        depth: u8,
+        cache: &mut LruCache<BoardHash, TranspositionItem, K>,
+        repetition: &HashSet<BoardHash>
+    ) -> Option<(ChessMove, i16)> {
+        if !repetition.is_empty() {
+            dbg!(repetition);
+        }
+
+        negamax_prelude(board, depth, rng, cache, repetition)
+    }
+
+    fn run_ai_2nd<K: BuildHasher>(
+        board: &Board,
+        rng: &mut impl Rng,
+        depth: u8,
+        cache: &mut LruCache<BoardHash, TranspositionItem, K>,
+        repetition: &HashSet<BoardHash>
+    ) -> Option<(ChessMove, i16)> {
+        negamax_prelude_2nd(board, depth, rng, cache, repetition)[1]
+    }
+
+    fn get_potential_repetition(game: &Game, base_game: &Game) -> HashSet<BoardHash> {
+        let mut occured = HashSet::with_capacity(game.actions().len());
+        let mut repeated = HashSet::new();
+
+        let mut board = base_game.current_position();
+
+        game.actions().iter()
+            .filter_map(|act| if let Action::MakeMove(mov) = act { Some(*mov) } else { None})
+            .enumerate()
+            .for_each(|(i, mov)| {
+                let hash = BoardHash::new(&board);
+                if !occured.insert(hash) {
+                    repeated.insert(hash);
+                }
+
+                board = board.make_move_new(mov);
+            });
+        repeated
     }
 
     fn mark_dirty(&mut self) {
@@ -440,13 +529,19 @@ impl ChessGraphic {
         let (rank, file) = (square.get_rank(), square.get_file());
         let r = {
             let r = rank.to_index() as f64;
-            if swap { (NUM_RANK-1) as f64 - r }
-            else { r }
+            if swap {
+                (NUM_RANK - 1) as f64 - r
+            } else {
+                r
+            }
         };
         let f = {
             let f = file.to_index() as f64;
-            if swap { (NUM_FILE-1) as f64 - f }
-            else { f }
+            if swap {
+                (NUM_FILE - 1) as f64 - f
+            } else {
+                f
+            }
         };
 
         let w = f64::from(viewport.draw_size[0]);
@@ -468,11 +563,19 @@ impl ChessGraphic {
 
         let file = File::from_index({
             let file_pos = NUM_FILE as f64 * rel_x;
-            if swap { NUM_FILE as f64 - file_pos } else { file_pos }
+            if swap {
+                NUM_FILE as f64 - file_pos
+            } else {
+                file_pos
+            }
         } as usize);
         let rank = Rank::from_index({
             let inv_rank_pos = NUM_RANK as f64 * rel_y;
-            if swap { inv_rank_pos } else { NUM_RANK as f64 - inv_rank_pos}
+            if swap {
+                inv_rank_pos
+            } else {
+                NUM_RANK as f64 - inv_rank_pos
+            }
         } as usize);
 
         Square::make_square(rank, file)

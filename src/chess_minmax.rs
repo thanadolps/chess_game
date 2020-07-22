@@ -1,10 +1,15 @@
-use chess::{get_file, Board, BoardStatus, ChessMove, Color, MoveGen, Piece, ALL_FILES, ALL_RANKS, NUM_RANKS, get_rank, EMPTY};
-use rand::Rng;
-use std::f64::{INFINITY, NEG_INFINITY};
-use lru::LruCache;
-use std::hash::{Hash, Hasher, BuildHasher};
 use crate::chess_minmax::main_evalation::evaluation_pieces_worth_plus;
-use itertools::Itertools;
+use chess::{
+    Board, BoardStatus, ChessMove, Color, MoveGen, Piece, ALL_FILES, ALL_RANKS, EMPTY, NUM_RANKS,
+};
+
+use lru::LruCache;
+
+use rand::Rng;
+
+use std::hash::{BuildHasher, Hash};
+use std::collections::HashSet;
+use std::option::Option::Some;
 
 pub mod main_evalation;
 
@@ -20,19 +25,26 @@ impl BoardHash {
     }
 }
 
-
 pub enum BoundedScore {
     LowerBound(i16),
     UpperBound(i16),
-    Exact(i16)
+    Exact(i16),
 }
 
 pub struct TranspositionItem {
     score: BoundedScore,
-    depth: u8
+    depth: u8,
 }
 
-fn negamax<K: BuildHasher>(board: &Board, depth: u8, mut a: i16, mut b: i16, rng: &mut impl Rng, cache: &mut LruCache<BoardHash, TranspositionItem, K>) -> i16 {
+fn negamax<K: BuildHasher>(
+    board: &Board,
+    depth: u8,
+    mut a: i16,
+    mut b: i16,
+    rng: &mut impl Rng,
+    cache: &mut LruCache<BoardHash, TranspositionItem, K>,
+    repetition: &HashSet<BoardHash>
+) -> i16 {
     // var setup
     let a_orig = a;
 
@@ -45,30 +57,43 @@ fn negamax<K: BuildHasher>(board: &Board, depth: u8, mut a: i16, mut b: i16, rng
     if depth == 0 {
         return color_index as i16 * evaluation_fn(board, rng);
     }
-/*
-    // Cache checking
-    let board_hash = BoardHash::new(board);
-    if let Some(tt_entry) =
-        cache.get(&board_hash).filter(|tte| tte.depth >= depth) {
 
+
+    let board_hash = BoardHash::new(board);
+
+    // terminating condition 3 (repetition)
+    // TODO: sanity check
+    if repetition.contains(&board_hash) {
+        return 0;
+    }
+
+    // Cache checking
+    if let Some(tt_entry) = cache.get(&board_hash).filter(|tte| tte.depth >= depth) {
         let entry_val = match tt_entry.score {
-            BoundedScore::Exact(ex) => { return ex},
-            BoundedScore::LowerBound(lb) => { a = i16::max(a, lb); lb },
-            BoundedScore::UpperBound(ub) => { b = i16::min(b, ub); ub },
+            BoundedScore::Exact(ex) => return ex,
+            BoundedScore::LowerBound(lb) => {
+                a = i16::max(a, lb);
+                lb
+            }
+            BoundedScore::UpperBound(ub) => {
+                b = i16::min(b, ub);
+                ub
+            }
         };
 
         if a >= b {
-            return entry_val
+            return entry_val;
         }
-    }*/
+    }
 
     // negamax core
     let child_nodes = MoveGen::new_legal(&board).map(|mov| board.make_move_new(mov));
 
     let mut value = -i16::MAX;
     for child in child_nodes {
-        let node_eval = -negamax(&child, depth - 1, -b, -a, rng, cache);
+        let node_eval = -negamax(&child, depth - 1, -b, -a, rng, cache, repetition);
         debug_assert!(node_eval > -i16::MAX);
+
         value = i16::max(value, node_eval);
 
         a = i16::max(a, value);
@@ -85,37 +110,46 @@ fn negamax<K: BuildHasher>(board: &Board, depth: u8, mut a: i16, mut b: i16, rng
         } else {
             BoardStatus::Checkmate
         };
-        return color_index as i16 * stats_eval_fn(status, color_index, depth)
+        return color_index as i16 * stats_eval_fn(status, color_index, depth);
     }
 
-/*
     // Cache store
-    let new_entry_score =
-    if value <= a_orig {
+    let new_entry_score = if value <= a_orig {
         BoundedScore::UpperBound(value)
-    }
-    else if value >= b {
+    } else if value >= b {
         BoundedScore::LowerBound(value)
-    }
-    else {
+    } else {
         BoundedScore::Exact(value)
     };
     let new_entry = TranspositionItem {
         score: new_entry_score,
-        depth
+        depth,
     };
-    cache.put(board_hash, new_entry);*/
+    cache.put(board_hash, new_entry);
 
     // Returning
     value
 }
 
-pub fn negamax_prelude<K: BuildHasher>(board: &Board, depth: u8, rng: &mut impl Rng, cache: &mut LruCache<BoardHash, TranspositionItem, K>) -> Option<(ChessMove, i16)> {
+pub fn negamax_prelude<K: BuildHasher>(
+    board: &Board,
+    depth: u8,
+    rng: &mut impl Rng,
+    cache: &mut LruCache<BoardHash, TranspositionItem, K>,
+    repetition: &HashSet<BoardHash>
+) -> Option<(ChessMove, i16)> {
     // var initialization
-    let mut a = -i16::MAX;  // don't use i16::MIN! it will overflow on negation
+    let mut a = -i16::MAX; // don't use i16::MIN! it will overflow on negation
     let b = i16::MAX;
-    dbg!(depth);
+
     // cache check doesn't provide move so it's unusable here
+
+    // TODO: prevent 3-fold repetition
+    // receive some kind of state in argument indicating last 2 repeating move? (or whatever it's actually is)
+    // filter that move out from search then depending on value of best_mov
+    // negative -> better to stalemate -> do the repeating move (repeating move from state)
+    // positive -> better to not stalemate -> use the best move as normal
+    // side benefit: state <-> undo system
 
     // negamax
     let child_nodes = MoveGen::new_legal(&board).map(|mov| (mov, board.make_move_new(mov)));
@@ -124,7 +158,7 @@ pub fn negamax_prelude<K: BuildHasher>(board: &Board, depth: u8, rng: &mut impl 
     let mut best_mov = None;
 
     for (mov, child) in child_nodes {
-        let node_eval = -negamax(&child, depth - 1, -b, -a, rng, cache);
+        let node_eval = -negamax(&child, depth - 1, -b, -a, rng, cache, repetition);
 
         if node_eval > value {
             value = node_eval;
@@ -136,24 +170,13 @@ pub fn negamax_prelude<K: BuildHasher>(board: &Board, depth: u8, rng: &mut impl 
             break;
         }
     }
-    /*
-    // Cache store
-    let new_entry_score =
-        // alpha case optimized out cause a_orig is -inf
-        if value <= -i16::MAX {
-            BoundedScore::UpperBound(value)
-        }
-        else if value >= b {
-            BoundedScore::LowerBound(value)
-        }
-        else {
-            BoundedScore::Exact(value)
-        };
+
+    // Cache store (will be exact since this is top layer)
     let new_entry = TranspositionItem {
-        score: new_entry_score,
-        depth
+        score: BoundedScore::Exact(value),
+        depth,
     };
-    cache.put(BoardHash::new(board), new_entry);*/
+    cache.put(BoardHash::new(board), new_entry);
 
     // Returning
     if best_mov.is_none() {
@@ -163,16 +186,74 @@ pub fn negamax_prelude<K: BuildHasher>(board: &Board, depth: u8, rng: &mut impl 
     best_mov.map(|mov| (mov, value))
 }
 
+pub fn negamax_prelude_2nd<K: BuildHasher>(
+    board: &Board,
+    depth: u8,
+    rng: &mut impl Rng,
+    cache: &mut LruCache<BoardHash, TranspositionItem, K>,
+    repetition: &HashSet<BoardHash>
+) -> [Option<(ChessMove, i16)>; 2] {
+    // var initialization
+    let mut a = -i16::MAX; // don't use i16::MIN! it will overflow on negation
+    let b = i16::MAX;
+
+    // cache check doesn't provide move so it's unusable here
+
+    // negamax
+    let child_nodes = MoveGen::new_legal(&board).map(|mov| (mov, board.make_move_new(mov)));
+
+    let mut value = -i16::MAX;
+    let mut best_mov = None;
+
+    let mut value_2nd = -i16::MAX;
+    let mut best_mov_2nd = None;
+
+    for (mov, child) in child_nodes {
+        let node_eval = -negamax(&child, depth - 1, -b, -a, rng, cache, repetition);
+
+        if node_eval > value {
+            value = node_eval;
+            best_mov = Some(mov);
+        } else if node_eval == value {
+            value_2nd = value;
+            best_mov_2nd = Some(mov);
+        }
+
+        a = i16::max(a, value);
+
+        if a >= b {
+            break;
+        }
+    }
+
+    // Cache store (will be exact since this is top layer)
+    let new_entry = TranspositionItem {
+        score: BoundedScore::Exact(value),
+        depth,
+    };
+    cache.put(BoardHash::new(board), new_entry);
+
+    // Returning
+    if best_mov.is_none() {
+        println!("\nNone End: {}", board);
+    }
+
+    [
+        best_mov.map(|mov| (mov, value)),
+        best_mov_2nd.map(|mov| (mov, value_2nd)),
+    ]
+}
+
 fn stats_eval_fn(stats: BoardStatus, color_index: i8, depth: u8) -> i16 {
     const CHECKMATE_SCORE: i16 = 20000; // base score when checkmated
-                                      // additional score for each depth when checkmated to encourage faster checkmate
-                                      //
-                                      // This should be large enough to compensate pieces value
-                                      // else AI won't do sacrifice for checkmate and AI will prefer eating all the enemy pieces than fast win
-                                      // which presumably we don't want
-                                      // beware of limit of i16 (max 32767)
-    // DEPTH * CHECKMATE_DEPTH_SCORE shall never exceed 8000
-    // else overflow will happen
+                                        // additional score for each depth when checkmated to encourage faster checkmate
+                                        //
+                                        // This should be large enough to compensate pieces value
+                                        // else AI won't do sacrifice for checkmate and AI will prefer eating all the enemy pieces than fast win
+                                        // which presumably we don't want
+                                        // beware of limit of i16 (max 32767)
+                                        // DEPTH * CHECKMATE_DEPTH_SCORE shall never exceed 8000
+                                        // else overflow will happen
     const CHECKMATE_DEPTH_SCORE: i16 = 500; // approximately rook
 
     match stats {
@@ -186,12 +267,12 @@ fn stats_eval_fn(stats: BoardStatus, color_index: i8, depth: u8) -> i16 {
     }
 }
 
-fn evaluation_fn(board: &Board, rng: &mut impl Rng) -> i16 {
+fn evaluation_fn(board: &Board, _rng: &mut impl Rng) -> i16 {
     // this function is call after move simulation so board.side_to_move() == enemy side
     // higher = better for white
 
-    let tiny_noise = rng.gen_range(-1, 2);
-    evaluation_pieces_worth_plus(board) + tiny_noise
+    // let tiny_noise = rng.gen_range(-1, 2);
+    evaluation_pieces_worth_plus(board)
 }
 
 fn evaluation_count_pieces(board: &Board) -> f64 {
@@ -251,15 +332,15 @@ fn evaluation_pieces_worth(board: &Board) -> f64 {
 
     9.0 * delta_queen + 5.0 * delta_rook + 3.0 * (delta_bishop + delta_knight) + 1.0 * delta_pawn
 }
-
+/*
 #[cfg(test)]
 mod tests {
 
     use super::negamax_prelude;
     use chess::{Board, ChessMove, Color, File, Rank, Square};
+    use lru::LruCache;
     use rand::thread_rng;
     use std::str::FromStr;
-    use lru::LruCache;
 
     fn build_move(file1: File, rank1: Rank, file2: File, rank2: Rank) -> ChessMove {
         ChessMove::new(
@@ -295,4 +376,4 @@ mod tests {
             assert_eq!(guess, *answer);
         }
     }
-}
+}*/
