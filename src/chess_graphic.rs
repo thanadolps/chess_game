@@ -202,10 +202,10 @@ impl ChessGraphic {
     }
 
     fn draw_grid(c: Context, g: &mut G2d, n_width: u32, n_height: u32) {
-        let [w, h] = c.viewport.unwrap().draw_size;
+        let [w, h] = c.viewport.unwrap().window_size;
 
-        let dw = w / n_width;
-        let dh = h / n_height;
+        let dw = w as u32 / n_width;
+        let dh = h as u32 / n_height;
 
         for (i, j) in (0..n_width).cartesian_product(0..n_height) {
             let x0 = f64::from(dw * i);
@@ -237,6 +237,7 @@ impl ChessGraphic {
 
         let img_size = ChessTexture::IMG_SIZE as f64;
         let [view_width, view_height] = vp_ref.window_size;
+        let [view_width, view_height] = [view_width as f64, view_height as f64];
         let grid_width = view_width / NUM_FILE as f64; // grid width
         let grid_height = view_height / NUM_RANK as f64; // grid height
         let sx = grid_width / img_size;
@@ -393,7 +394,8 @@ impl ChessGraphic {
     }
 
     pub fn on_resize(&mut self, resize_args: ResizeArgs) {
-        self.draw_size = resize_args.draw_size;
+        let [w, h] = resize_args.window_size;
+        self.draw_size = [w as _, h as _];
     }
 
     fn undo(&mut self) {
@@ -484,10 +486,6 @@ impl ChessGraphic {
         cache: &mut LruCache<BoardHash, TranspositionItem, K>,
         repetition: &HashSet<BoardHash>
     ) -> Option<(ChessMove, i16)> {
-        if !repetition.is_empty() {
-            dbg!(repetition);
-        }
-
         negamax_prelude(board, depth, rng, cache, repetition)
     }
 
@@ -544,8 +542,8 @@ impl ChessGraphic {
             }
         };
 
-        let w = f64::from(viewport.draw_size[0]);
-        let h = f64::from(viewport.draw_size[1]);
+        let w = f64::from(viewport.window_size[0]);
+        let h = f64::from(viewport.window_size[1]);
 
         let x0 = (w * f) / NUM_FILE as f64;
         let y0 = h - ((h * r) / NUM_RANK as f64);
