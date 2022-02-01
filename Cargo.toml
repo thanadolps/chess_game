@@ -7,12 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chess = "3.1.1"
-rand = "0.7.3"
-itertools = "0.9.0"
-piston_window = "0.108.0"
-lru = "0.5.2"
-seahash = "4.0.0"
+chess = "3.2.0"
+rand = "0.8.4"
+itertools = "0.10.3"
+piston_window = "0.121.0"
+lru = "0.7.2"
+seahash = "4.1.0"
 arraydeque = "0.4.5"
 
 [profile.release]
